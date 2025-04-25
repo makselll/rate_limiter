@@ -1,0 +1,3 @@
+podUrl: "test.com"
+limitType: "ip"
+tokensCount: 10
