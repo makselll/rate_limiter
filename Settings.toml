@@ -1,3 +1,3 @@
-pods_url = "0.0.0.0:8000"
+pods_url = "python-server:5000"
 limit_type = "ip"
 tokens_count = 10

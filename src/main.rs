@@ -35,7 +35,7 @@ async fn handler(
 ) -> impl IntoResponse {
     let host = axum_proxy::builder_http(settings.pods_url.clone()).unwrap();
     let mut svc = host.build(AppendSuffix(""));
-    
+
     match svc.call(request).await {
         Ok(response) => response.unwrap().into_response(),
         Err(err) => {
@@ -51,12 +51,12 @@ async fn handler(
 #[tokio::main]
 async fn main() {
     let settings = Arc::new(Settings::new().expect("Failed to load settings"));
-    
+
     let app = Router::new()
         .route("/*path", any(handler))
         .route("/", any(handler))
         .with_state(settings);
-    
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
         .unwrap();
