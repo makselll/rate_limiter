@@ -2,12 +2,20 @@ from flask import Flask, jsonify
 import os
 
 app = Flask(__name__)
+hostname = os.environ.get('HOSTNAME', 'unknown')
+
 
 @app.route('/')
-def hello():
-    hostname = os.environ.get('HOSTNAME', 'unknown')
+def base():
     return jsonify({
         'message': 'Hello from Python server!',
+        'server_id': hostname
+    })
+
+@app.route('/hello')
+def hello():
+    return jsonify({
+        'message': 'Hello world from Flask!',
         'server_id': hostname
     })
 

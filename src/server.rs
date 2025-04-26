@@ -1,36 +1,44 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
+use axum::middleware::from_fn_with_state;
 use axum::routing::any;
 use axum_proxy::AppendSuffix;
 use tower_service::Service;
+use crate::limiter;
+use crate::limiter::RateLimiter;
 use crate::settings::Settings;
 
 pub struct ProxyServer {
-    settings: Settings
+    settings: Arc<Settings>
+    
 }
 
 impl ProxyServer {
     
     pub fn new(settings: Settings) -> Self {
         Self {
-            settings
+            settings: Arc::new(settings)
         }
         
     }
     pub async fn run(self) -> Result<(), std::io::Error>{
         let listener = tokio::net::TcpListener::bind(self.settings.proxy_server_addr.clone())
             .await?;
+
+        let limiter = RateLimiter::new(&self.settings.limit_type, self.settings.tokens_count);
         
         let app = Router::new()
             .route("/*path", any(handler))
             .route("/", any(handler))
-            .with_state(Arc::new(self.settings));
+            .layer(from_fn_with_state(Arc::new(limiter), limiter::middleware))
+            .with_state(self.settings);
         
-        axum::serve(listener, app).await
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
     }
 }
 

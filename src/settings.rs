@@ -1,11 +1,11 @@
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Settings {
     pub target_url: String,
     pub limit_type: String,
-    pub tokens_count: u8,
+    pub tokens_count: u32,
     pub proxy_server_addr: String,
 }
 
