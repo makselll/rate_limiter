@@ -1,3 +1,4 @@
-pods_url = "python-server:5000"
+target_url = "python-server:5000"
 limit_type = "ip"
 tokens_count = 10
+proxy_server_addr = "0.0.0.0:3000"
