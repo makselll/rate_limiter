@@ -1,11 +1,12 @@
+use std::collections::HashSet;
+use std::net::IpAddr;
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
-
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Settings {
     #[serde(rename = "rate_limiter")]
-    pub rate_limiter_settings: Vec<RateLimiterSettings>,
+    pub rate_limiter_settings: RateLimiterSettings,
 
     #[serde(rename = "api_gateway")]
     pub api_gateway_settings: ApiGatewaySettings,
@@ -17,10 +18,25 @@ pub struct ApiGatewaySettings {
     pub proxy_server_addr: String,
 }
 
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct RateLimiterSettings {
-    pub limit_type: String,
+    pub redis_addr: String,
+    pub ip_whitelist: HashSet<IpAddr>,
+
+    #[serde(rename = "limiter")]
+    pub limiters_settings: Vec<LimiterSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PossibleStrategies {
+    IP,
+    URL,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct LimiterSettings {
+    pub strategy: PossibleStrategies,
     pub tokens_count: u32,
 }
 

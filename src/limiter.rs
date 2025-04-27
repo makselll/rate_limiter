@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::thread;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -8,7 +8,7 @@ use axum::extract::{ConnectInfo, Request as AxumRequest, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use crate::settings::{RateLimiterSettings};
+use crate::settings::{PossibleStrategies, RateLimiterSettings};
 
 pub async fn middleware(
     State(rate_limiter_manager): State<Arc<RateLimiterManager>>,
@@ -16,6 +16,11 @@ pub async fn middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    if rate_limiter_manager.ip_whitelist.contains(&addr.ip()) {
+        println!("IP {} is whitelisted", addr.ip());
+        return next.run(request).await
+    }
+    
     let mut is_too_many_requests = false;
     for limiter in rate_limiter_manager.rate_limiters.iter() {
         if !limiter.check(&request, ConnectInfo(addr)) {
@@ -39,11 +44,10 @@ pub enum Strategy {
 }
 
 impl Strategy {
-    pub fn from_limit_type(limit_type: &str) -> Self {
-        match limit_type {
-            "ip" => Strategy::IP(IPRateLimiterStrategy),
-            "url" => Strategy::Url(UrlRateLimiterStrategy),
-            _ => panic!("Unknown limiter type"),
+    pub fn from_possible_strategy(strategy: &PossibleStrategies) -> Self {
+        match strategy {
+            PossibleStrategies::IP => Strategy::IP(IPRateLimiterStrategy),
+            PossibleStrategies::URL => Strategy::Url(UrlRateLimiterStrategy),
         }
     }
     
@@ -63,20 +67,24 @@ impl Strategy {
 }
 
 pub struct RateLimiterManager {
+    redis_addr: String,
+    ip_whitelist: HashSet<IpAddr>,
     rate_limiters: Vec<RateLimiter>,
 }
 
 impl RateLimiterManager {
-    pub fn new(rate_limiter_settings: Arc<Vec<RateLimiterSettings>>) -> Self {
+    pub fn new(rate_limiter_settings: Arc<RateLimiterSettings>) -> Self {
         let mut rate_limiters = Vec::new();
         
-        for setting in rate_limiter_settings.iter() {
-            let strategy = Strategy::from_limit_type(&setting.limit_type);
+        for setting in rate_limiter_settings.limiters_settings.iter() {
+            let strategy = Strategy::from_possible_strategy(&setting.strategy);
             rate_limiters.push(RateLimiter::new(strategy, setting.tokens_count));
         }
         
         Self {
-            rate_limiters
+            rate_limiters,
+            redis_addr: rate_limiter_settings.redis_addr.clone(),
+            ip_whitelist: rate_limiter_settings.ip_whitelist.clone(),
         }
     }
 }
