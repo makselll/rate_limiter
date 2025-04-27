@@ -1,4 +1,11 @@
+[api_gateway]
 target_url = "python-server:5000"
-limit_type = "url"
-tokens_count = 5
 proxy_server_addr = "0.0.0.0:3000"
+
+[[rate_limiter]]
+limit_type = "url"
+tokens_count = 3
+
+[[rate_limiter]]
+limit_type = "ip"
+tokens_count = 10
