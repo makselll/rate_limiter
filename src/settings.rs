@@ -37,7 +37,14 @@ pub enum PossibleStrategies {
 #[derive(Deserialize, Debug, Clone)]
 pub struct LimiterSettings {
     pub strategy: PossibleStrategies,
+    pub bucket: BucketSettings,
+}
+
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct BucketSettings {
     pub tokens_count: u32,
+    pub add_tokens_every: u32,
 }
 
 impl Settings {

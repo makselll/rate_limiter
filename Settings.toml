@@ -9,8 +9,8 @@ ip_whitelist = ["127.0.0.1", "198.0.0.1"]
 
 [[rate_limiter.limiter]]
 strategy = "url"
-tokens_count = 3
+bucket = { tokens_count = 3, add_tokens_every = 10 }
 
 [[rate_limiter.limiter]]
 strategy = "ip"
-tokens_count = 10
+bucket = { tokens_count = 10, add_tokens_every = 120 }
