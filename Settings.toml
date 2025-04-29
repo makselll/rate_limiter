@@ -5,7 +5,7 @@ proxy_server_addr = "0.0.0.0:3000"
 
 [rate_limiter]
 redis_addr = "redis:6379"
-ip_whitelist = ["127.0.0.1", "198.0.0.1", "192.168.107.1"]
+ip_whitelist = ["127.0.0.1", "198.0.0.1"]
 
 [[rate_limiter.limiter]]
 strategy = "url"
