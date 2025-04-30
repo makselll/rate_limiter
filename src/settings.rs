@@ -32,6 +32,8 @@ pub struct RateLimiterSettings {
 pub enum PossibleStrategies {
     IP,
     URL,
+    #[serde(rename = "auth_header")]
+    AuthHeader,
 }
 
 #[derive(Deserialize, Debug, Clone)]

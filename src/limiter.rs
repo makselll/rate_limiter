@@ -65,6 +65,7 @@ pub async fn middleware(
 pub enum Strategy {
     IP(IPRateLimiterStrategy),
     Url(UrlRateLimiterStrategy),
+    AuthHeader(AuthHeaderRateLimiterStrategy),
 }
 
 impl Strategy {
@@ -72,6 +73,7 @@ impl Strategy {
         match strategy {
             PossibleStrategies::IP => Strategy::IP(IPRateLimiterStrategy),
             PossibleStrategies::URL => Strategy::Url(UrlRateLimiterStrategy),
+            PossibleStrategies::AuthHeader => Strategy::AuthHeader(AuthHeaderRateLimiterStrategy),
         }
     }
 
@@ -85,6 +87,8 @@ impl Strategy {
         match self {
             Strategy::IP(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
             Strategy::Url(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
+            Strategy::AuthHeader(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
+            
         }
     }
 
@@ -110,6 +114,7 @@ impl RateLimiterManager {
             let strategy = Strategy::from_possible_strategy(&setting.strategy);
             match strategy {
                 Strategy::IP(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), Bucket::from(&setting.bucket)))),
+                Strategy::AuthHeader(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), Bucket::from(&setting.bucket)))),
                 Strategy::Url(_) => url_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), Bucket::from(&setting.bucket)))),   
             }
         }
@@ -170,7 +175,11 @@ impl RateLimiter {
 #[async_trait]
 pub trait RateLimiterChecker {
     async fn check_limit(&self, mut redis_connection: Connection, bucket: &Bucket, request: &SafeRequest, addr: SocketAddr) -> bool {
-        let key = self.get_redis_key(request, addr);
+        let key = match self.get_redis_key(request, addr) {
+            Some(key) => key,
+            None => return true, // skip this check because we can't define what value we should check
+        };
+        
         redis::cmd("SET")
             .arg(&key)
             .arg(bucket.tokens_count)
@@ -191,7 +200,7 @@ pub trait RateLimiterChecker {
         count >= 0
     }
     
-    fn get_redis_key(&self, request: &SafeRequest, addr: SocketAddr) -> String;
+    fn get_redis_key(&self, request: &SafeRequest, addr: SocketAddr) -> Option<String>;
 }
 
 
@@ -200,21 +209,32 @@ pub struct IPRateLimiterStrategy;
 #[derive(Clone, Debug)]
 pub struct UrlRateLimiterStrategy;
 
+#[derive(Clone, Debug)]
+pub struct AuthHeaderRateLimiterStrategy;
+
 
 #[async_trait]
 impl RateLimiterChecker for IPRateLimiterStrategy {
-    fn get_redis_key(&self, _request: &SafeRequest, addr: SocketAddr) -> String {
+    fn get_redis_key(&self, _request: &SafeRequest, addr: SocketAddr) -> Option<String> {
         let ip = addr.ip();
-        format!("rate_limiter:ip:{}", ip)
+        Some(format!("rate_limiter:ip:{}", ip))
     }
 }
 
 
 #[async_trait]
 impl RateLimiterChecker for UrlRateLimiterStrategy {
-    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr) -> String {
+    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr) -> Option<String> {
         let uri = &request.parts.uri;
-        format!("rate_limiter:url:{}", uri)
+        Some(format!("rate_limiter:url:{}", uri))
+    }
+}
+
+
+impl RateLimiterChecker for AuthHeaderRateLimiterStrategy {
+    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr) -> Option<String> {
+        let auth_header = request.parts.headers.get("authorization")?.to_str().ok()?;
+        Some(format!("rate_limiter:auth_header:{}", auth_header))
     }
 }
 
