@@ -4,7 +4,7 @@ use std::sync::{Arc};
 use axum::async_trait;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{ConnectInfo, State};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode};
 use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -34,31 +34,49 @@ pub async fn middleware(
     };
     
     let safe_request = SafeRequest::new(parts, body_bytes);
-    let mut is_limit_exceeded = false;
+    let mut lowest_limit: Option<LimitForRequest> = None;
     
     for rate_limiter in rate_limiter_manager.user_rate_limiters.iter() {
-        if !rate_limiter.check(&safe_request, addr).await {
-            is_limit_exceeded = true;
+        let limit = rate_limiter.check(&safe_request, addr).await;
+        match &lowest_limit {
+            Some(current) if current > &limit => lowest_limit = Some(limit),
+            None => lowest_limit = Some(limit),
+            _ => {}
         }
     }
-
-    if is_limit_exceeded {
-        println!("Rate limit exceeded for {}", addr.ip());
-        return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+    
+    if let Some(limit) = &lowest_limit {
+        if limit.is_limit_exceeded {
+            println!("Rate limit exceeded for {}", addr.ip());
+            return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+        }
     }
-
+    
     for rate_limiter in rate_limiter_manager.url_rate_limiters.iter() {
-        if !rate_limiter.check(&safe_request, addr).await {
-            is_limit_exceeded = true;
+        let limit = rate_limiter.check(&safe_request, addr).await;
+        match &lowest_limit {
+            Some(current) if current > &limit => lowest_limit = Some(limit),
+            None => lowest_limit = Some(limit),
+            _ => {}
+        }
+    }
+    
+    if let Some(limit) = &lowest_limit {
+        if limit.is_limit_exceeded {
+            println!("Rate limit exceeded for {}", addr.ip());
+            return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
         }
     }
 
-    if is_limit_exceeded {
-        println!("Rate limit exceeded for {}", addr.ip());
-        return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
-    }
+    let mut response = next.run(Request::from_parts(safe_request.parts, Body::from(safe_request.body))).await;
 
-    next.run(Request::from_parts(safe_request.parts, Body::from(safe_request.body))).await
+    if let Some(limit) = &lowest_limit {
+        let headers = response.headers_mut();   
+        headers.insert("X-RateLimit-Limit", HeaderValue::from(limit.total_limit.unwrap()));
+        headers.insert("X-RateLimit-Remaining", HeaderValue::from(limit.requests_to_exceed_limit.unwrap()));
+    }
+    
+    response
 }
 
 #[derive(Clone, Debug)]
@@ -83,7 +101,7 @@ impl Strategy {
         bucket: &Bucket,
         request: &SafeRequest,
         addr: SocketAddr,
-    ) -> bool {
+    ) -> LimitForRequest {
         match self {
             Strategy::IP(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
             Strategy::Url(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
@@ -161,10 +179,10 @@ impl RateLimiter {
         }
     }
     
-    pub async fn check(&self, request: &SafeRequest, addr: SocketAddr) -> bool {
+    pub async fn check(&self, request: &SafeRequest, addr: SocketAddr) -> LimitForRequest {
         let redis_conn = match self.redis_pool.get().await {
             Ok(redis_conn) => redis_conn,
-            Err(_) => return false
+            Err(_) => return LimitForRequest::default(),
         };
         self.strategy.check_limit(redis_conn, &self.bucket, request, addr).await
 
@@ -174,10 +192,10 @@ impl RateLimiter {
 
 #[async_trait]
 pub trait RateLimiterChecker {
-    async fn check_limit(&self, mut redis_connection: Connection, bucket: &Bucket, request: &SafeRequest, addr: SocketAddr) -> bool {
+    async fn check_limit(&self, mut redis_connection: Connection, bucket: &Bucket, request: &SafeRequest, addr: SocketAddr) -> LimitForRequest {
         let key = match self.get_redis_key(request, addr) {
             Some(key) => key,
-            None => return true, // skip this check because we can't define what value we should check
+            None => return LimitForRequest::default(), // skip this check because we can't define what value we should check
         };
         
         redis::cmd("SET")
@@ -197,7 +215,7 @@ pub trait RateLimiterChecker {
             .await
             .unwrap_or(-1); // Set to 0 if the key doesn't exist
 
-        count >= 0
+        LimitForRequest::new(Some(bucket.tokens_count), Some(count),count < 0)
     }
     
     fn get_redis_key(&self, request: &SafeRequest, addr: SocketAddr) -> Option<String>;
@@ -249,5 +267,49 @@ impl SafeRequest {
             parts,
             body,
         }
+    }
+}
+
+
+#[derive(Clone, Debug)]
+pub struct LimitForRequest {
+    total_limit: Option<u32>,
+    requests_to_exceed_limit: Option<i32>,
+    is_limit_exceeded: bool,
+}
+
+impl LimitForRequest {
+    pub fn new(total_limit: Option<u32>, requests_to_exceed_limit: Option<i32>, is_limit_exceeded: bool) -> Self {
+        Self {
+            total_limit,
+            requests_to_exceed_limit,
+            is_limit_exceeded,
+        }
+    }
+}
+
+impl Default for LimitForRequest {
+    fn default() -> Self {
+        Self::new(None, None, false)
+    }
+}
+
+impl PartialEq for LimitForRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requests_to_exceed_limit == other.requests_to_exceed_limit
+    }
+}
+
+impl Eq for LimitForRequest {}
+
+impl Ord for LimitForRequest {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.requests_to_exceed_limit.cmp(&other.requests_to_exceed_limit)
+    }
+}
+
+impl PartialOrd for LimitForRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.requests_to_exceed_limit.cmp(&other.requests_to_exceed_limit))
     }
 }
