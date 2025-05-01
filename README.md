@@ -10,10 +10,18 @@ A flexible and powerful rate limiting solution that can be configured to limit r
 - Configurable token bucket parameters
 - Support for global and per-value rate limits
 - Easy configuration through TOML file
+- Flexible configuration path setup via environment variables
 
 ## Configuration
 
-The rate limiter is configured through a `Settings.toml` file. Here's a detailed breakdown of the configuration options:
+The rate limiter is configured through a `Settings.toml` file. You can specify the path to your configuration file using the `RL_SETTINGS_PATH` environment variable. If not specified, the rate limiter will look for the Settings.toml file in the current directory.
+
+```bash
+# Example of setting custom configuration path
+export RL_SETTINGS_PATH=/path/to/your/custom/Settings.toml
+```
+
+Here's a detailed breakdown of the configuration options:
 
 ### API Gateway Configuration
 

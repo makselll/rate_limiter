@@ -1,4 +1,5 @@
 use std::collections::{HashSet};
+use std::env;
 use std::net::IpAddr;
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
@@ -59,8 +60,10 @@ pub struct BucketSettings {
 
 impl Settings {
     pub fn new() -> Result<Settings, ConfigError> {
+        let config_path = env::var("RL_SETTINGS_PATH").unwrap_or_else(|_| "./Settings.toml".to_string());
+
         let settings = Config::builder()
-            .add_source(File::with_name("./Settings.toml"))
+            .add_source(File::with_name(&config_path))
             .build()?;
 
         settings.try_deserialize()
