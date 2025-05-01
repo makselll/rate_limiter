@@ -12,3 +12,4 @@ axum-proxy = { version = "0.4.1", features = ["http1"] }
 tower-service = "0.3.3"
 deadpool-redis = "0.20.0"
 axum-macros = "0.5.0"
+url = "2.5.4"

@@ -971,6 +971,7 @@ dependencies = [
  "serde",
  "tokio",
  "tower-service",
+ "url",
 ]
 
 [[package]]

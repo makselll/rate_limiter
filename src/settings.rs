@@ -33,6 +33,7 @@ pub enum PossibleStrategies {
     IP,
     URL,
     Header,
+    Query,
 }
 
 #[derive(Deserialize, Debug, Clone)]

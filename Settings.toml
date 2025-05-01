@@ -23,5 +23,11 @@ ip_whitelist = ["127.0.0.1", "198.0.0.1"]
 strategy = "header"
 global_bucket = { tokens_count = 3, add_tokens_every = 120 }
 buckets_per_value = [
-    { value = "X-Telegram-User-Token", tokens_count = 1, add_tokens_every = 10 },
+    { value = "X-Telegram-User-Token", tokens_count = 1, add_tokens_every = 100 },
+]
+
+[[rate_limiter.limiter]]
+strategy = "query"
+buckets_per_value = [
+    { value = "qaz", tokens_count = 1, add_tokens_every = 30 },
 ]
