@@ -34,6 +34,7 @@ pub enum PossibleStrategies {
     URL,
     Header,
     Query,
+    Body,
 }
 
 #[derive(Deserialize, Debug, Clone)]

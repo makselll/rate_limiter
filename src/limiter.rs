@@ -111,6 +111,7 @@ impl RateLimiterManager {
                 Strategy::Header(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
                 Strategy::Url(_) => request_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
                 Strategy::Query(_) => request_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
+                Strategy::Body(_) => request_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
             }
         }
         

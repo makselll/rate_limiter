@@ -969,6 +969,7 @@ dependencies = [
  "config",
  "deadpool-redis",
  "serde",
+ "serde_json",
  "tokio",
  "tower-service",
  "url",

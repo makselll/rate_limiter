@@ -3,6 +3,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use axum::async_trait;
 use deadpool_redis::{redis, Connection};
+use serde_json::Value;
 use url::{form_urlencoded};
 use crate::limiter::{Bucket, SafeRequest};
 use crate::settings::PossibleStrategies;
@@ -111,6 +112,9 @@ pub struct HeaderRateLimiterStrategy;
 #[derive(Clone, Debug)]
 pub struct RequestQueryRateLimiterStrategy;
 
+#[derive(Clone, Debug)]
+pub struct RequestBodyRateLimiterStrategy;
+
 
 #[async_trait]
 impl RateLimiterChecker for IPRateLimiterStrategy {
@@ -175,7 +179,7 @@ impl RateLimiterChecker for RequestQueryRateLimiterStrategy {
     fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr, _global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>) -> Option<LimitRedisKey> {
         let mut found_param: Option<String> = None;
         let mut found_bucket: Option<Bucket> = None;
-        
+
         if let Some(query) = request.parts.uri.query() {
             for (k, v) in form_urlencoded::parse(query.as_bytes()) {
                 if let Some(bucket) = buckets_per_value?.get(&k.to_string()) {
@@ -185,8 +189,27 @@ impl RateLimiterChecker for RequestQueryRateLimiterStrategy {
                 }
             }
         }
-        
+
         Some(LimitRedisKey::new(format!("rate_limiter:query:{}", self.hash_key(found_param?)), found_bucket?))
+    }
+}
+
+
+impl RateLimiterChecker for RequestBodyRateLimiterStrategy {
+    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr, _global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>) -> Option<LimitRedisKey> {
+        let mut found_param: Option<String> = None;
+        let mut found_bucket: Option<Bucket> = None;
+
+        let json_body: HashMap<String, Value> = serde_json::from_slice(&request.body).unwrap_or_default();
+        for (k, v) in json_body {
+            if let Some(bucket) = buckets_per_value?.get(&k.to_string()) {
+                found_param = Some(format!("{}:{}", k, v));
+                found_bucket = Some(bucket.to_owned());
+                break;
+            }
+        }
+        
+        Some(LimitRedisKey::new(format!("rate_limiter:json:{}", self.hash_key(found_param?)), found_bucket?))
     }
 }
 
@@ -197,6 +220,7 @@ pub enum Strategy {
     Url(UrlRateLimiterStrategy),
     Header(HeaderRateLimiterStrategy),
     Query(RequestQueryRateLimiterStrategy),
+    Body(RequestBodyRateLimiterStrategy),
 }
 
 impl Strategy {
@@ -206,6 +230,7 @@ impl Strategy {
             PossibleStrategies::URL => Strategy::Url(UrlRateLimiterStrategy),
             PossibleStrategies::Header => Strategy::Header(HeaderRateLimiterStrategy),
             PossibleStrategies::Query => Strategy::Query(RequestQueryRateLimiterStrategy),
+            PossibleStrategies::Body => Strategy::Body(RequestBodyRateLimiterStrategy),
         }
     }
 
@@ -222,6 +247,7 @@ impl Strategy {
             Strategy::Url(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value,request, addr).await,
             Strategy::Header(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value,request, addr).await,
             Strategy::Query(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value,request, addr).await,
+            Strategy::Body(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value,request, addr).await,
 
         }
     }
