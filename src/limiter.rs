@@ -1,4 +1,5 @@
-use std::collections::{HashSet};
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc};
 use axum::async_trait;
@@ -36,44 +37,42 @@ pub async fn middleware(
     let safe_request = SafeRequest::new(parts, body_bytes);
     let mut lowest_limit: Option<LimitForRequest> = None;
     
-    for rate_limiter in rate_limiter_manager.user_rate_limiters.iter() {
-        let limit = rate_limiter.check(&safe_request, addr).await;
-        match &lowest_limit {
-            Some(current) if current > &limit => lowest_limit = Some(limit),
-            None => lowest_limit = Some(limit),
-            _ => {}
-        }
-    }
+    let rate_limiter_groups = vec!(
+        &rate_limiter_manager.user_rate_limiters, // start to check the user
+        &rate_limiter_manager.url_rate_limiters // check the urls
+    );
     
-    if let Some(limit) = &lowest_limit {
-        if limit.is_limit_exceeded {
-            println!("Rate limit exceeded for {}", addr.ip());
-            return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+    for rate_limiters_group in rate_limiter_groups {
+        for rate_limiter in rate_limiters_group.iter() {
+            let limit = rate_limiter.check(&safe_request, addr).await;
+            match limit {
+                None => continue,
+                Some(limit) => {
+                    match &lowest_limit {
+                        Some(current) if current > &limit => lowest_limit = Some(limit),
+                        None => lowest_limit = Some(limit),
+                        _ => {}
+                    }
+                }
+            }
         }
-    }
-    
-    for rate_limiter in rate_limiter_manager.url_rate_limiters.iter() {
-        let limit = rate_limiter.check(&safe_request, addr).await;
-        match &lowest_limit {
-            Some(current) if current > &limit => lowest_limit = Some(limit),
-            None => lowest_limit = Some(limit),
-            _ => {}
-        }
-    }
-    
-    if let Some(limit) = &lowest_limit {
-        if limit.is_limit_exceeded {
-            println!("Rate limit exceeded for {}", addr.ip());
-            return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
-        }
-    }
 
+        if let Some(limit) = &lowest_limit {
+            if limit.is_limit_exceeded {
+                println!("Rate limit exceeded for {}", addr.ip());
+                return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+            }
+        }
+    }
+    
     let mut response = next.run(Request::from_parts(safe_request.parts, Body::from(safe_request.body))).await;
 
+    dbg!(&lowest_limit);
+    
     if let Some(limit) = &lowest_limit {
         let headers = response.headers_mut();   
-        headers.insert("X-RateLimit-Limit", HeaderValue::from(limit.total_limit.unwrap()));
-        headers.insert("X-RateLimit-Remaining", HeaderValue::from(limit.requests_to_exceed_limit.unwrap()));
+        headers.insert("X-RateLimit-Limit", HeaderValue::from(limit.total_limit));
+        headers.insert("X-RateLimit-Remaining", HeaderValue::from(limit.requests_to_exceed_limit));
     }
     
     response
@@ -83,7 +82,7 @@ pub async fn middleware(
 pub enum Strategy {
     IP(IPRateLimiterStrategy),
     Url(UrlRateLimiterStrategy),
-    AuthHeader(AuthHeaderRateLimiterStrategy),
+    Header(HeaderRateLimiterStrategy),
 }
 
 impl Strategy {
@@ -91,21 +90,22 @@ impl Strategy {
         match strategy {
             PossibleStrategies::IP => Strategy::IP(IPRateLimiterStrategy),
             PossibleStrategies::URL => Strategy::Url(UrlRateLimiterStrategy),
-            PossibleStrategies::AuthHeader => Strategy::AuthHeader(AuthHeaderRateLimiterStrategy),
+            PossibleStrategies::Header => Strategy::Header(HeaderRateLimiterStrategy),
         }
     }
 
     async fn check_limit(
         &self,
         redis_connection: Connection,
-        bucket: &Bucket,
+        global_bucket: Option<&Bucket>,
+        buckets_per_value: Option<&HashMap<String, Bucket>>,
         request: &SafeRequest,
         addr: SocketAddr,
-    ) -> LimitForRequest {
+    ) -> Option<LimitForRequest> {
         match self {
-            Strategy::IP(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
-            Strategy::Url(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
-            Strategy::AuthHeader(strategy) => strategy.check_limit(redis_connection, bucket, request, addr).await,
+            Strategy::IP(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value, request, addr).await,
+            Strategy::Url(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value,request, addr).await,
+            Strategy::Header(strategy) => strategy.check_limit(redis_connection, global_bucket, buckets_per_value,request, addr).await,
             
         }
     }
@@ -120,20 +120,31 @@ pub struct RateLimiterManager {
 }
 
 impl RateLimiterManager {
-    pub fn new(rate_limiter_settings: RateLimiterSettings) -> Result<Self, deadpool_redis::CreatePoolError> {
+    pub fn new(rate_limiter_settings: RateLimiterSettings) -> Result<Self, std::io::Error> {
         let mut user_rate_limiters = Vec::new();
         let mut url_rate_limiters = Vec::new();
 
 
         let cfg = Config::from_url(format!("redis://{}", rate_limiter_settings.redis_addr.as_str()));
-        let pool = cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+        let pool = cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        for setting in rate_limiter_settings.limiters_settings.iter() {
-            let strategy = Strategy::from_possible_strategy(&setting.strategy);
+        for settings in rate_limiter_settings.limiters_settings.iter() {
+            let strategy = Strategy::from_possible_strategy(&settings.strategy);
+            let global_bucket= settings.global_bucket.as_ref().map(Bucket::from);
+            
+            let buckets_per_value = settings.buckets_per_value.as_ref().map(
+                |buckets| buckets.iter().map(
+                    |b| (b.value.clone(), Bucket::new(b.tokens_count, b.add_tokens_every))
+                ).collect());
+            
+            if buckets_per_value.is_none() && global_bucket.is_none() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"No bucket defined for rate limiter"))
+            }
+            
             match strategy {
-                Strategy::IP(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), Bucket::from(&setting.bucket)))),
-                Strategy::AuthHeader(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), Bucket::from(&setting.bucket)))),
-                Strategy::Url(_) => url_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), Bucket::from(&setting.bucket)))),   
+                Strategy::IP(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
+                Strategy::Header(_) => user_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
+                Strategy::Url(_) => url_rate_limiters.push(Arc::new(RateLimiter::new(strategy, pool.clone(), global_bucket, buckets_per_value))),
             }
         }
         
@@ -152,39 +163,48 @@ pub struct Bucket {
     add_tokens_every: u32,
 }
 
-impl From<&BucketSettings> for Bucket {
-    fn from(bucket_settings: &BucketSettings) -> Self {
+impl Bucket {
+    pub fn new(tokens_count: u32, add_tokens_every: u32) -> Self {
         Self {
-            tokens_count: bucket_settings.tokens_count,
-            add_tokens_every: bucket_settings.add_tokens_every,
+            tokens_count,
+            add_tokens_every,
+        }
+    }
+}
+
+impl From<&BucketSettings> for Bucket {
+    fn from(settings: &BucketSettings) -> Self {
+        Self {
+            tokens_count: settings.tokens_count,
+            add_tokens_every: settings.add_tokens_every,
         }
     }   
 }
-
-
 #[derive(Clone, Debug)]
 struct RateLimiter {
     strategy: Strategy,
     redis_pool: Pool,
-    bucket: Bucket,
+    global_bucket: Option<Bucket>,
+    buckets_per_value: Option<HashMap<String, Bucket>>,
 }
 
 
 impl RateLimiter {
-    pub fn new(strategy: Strategy, redis_pool: Pool, bucket: Bucket) -> Self {
+    pub fn new(strategy: Strategy, redis_pool: Pool, global_bucket: Option<Bucket>, buckets_per_value: Option<HashMap<String, Bucket>>) -> Self {
         Self {
             strategy,
-            bucket,
             redis_pool,
+            global_bucket,
+            buckets_per_value,
         }
     }
     
-    pub async fn check(&self, request: &SafeRequest, addr: SocketAddr) -> LimitForRequest {
+    pub async fn check(&self, request: &SafeRequest, addr: SocketAddr) -> Option<LimitForRequest> {
         let redis_conn = match self.redis_pool.get().await {
             Ok(redis_conn) => redis_conn,
-            Err(_) => return LimitForRequest::default(),
+            Err(_) => return None,
         };
-        self.strategy.check_limit(redis_conn, &self.bucket, request, addr).await
+        self.strategy.check_limit(redis_conn, self.global_bucket.as_ref(), self.buckets_per_value.as_ref(), request, addr).await
 
     }
 }
@@ -192,17 +212,20 @@ impl RateLimiter {
 
 #[async_trait]
 pub trait RateLimiterChecker {
-    async fn check_limit(&self, mut redis_connection: Connection, bucket: &Bucket, request: &SafeRequest, addr: SocketAddr) -> LimitForRequest {
-        let key = match self.get_redis_key(request, addr) {
+    
+    
+    async fn check_limit(&self, mut redis_connection: Connection, global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>, request: &SafeRequest, addr: SocketAddr) -> Option<LimitForRequest> {
+        let limit_redis_key = match self.get_redis_key(request, addr, global_bucket, buckets_per_value) {
             Some(key) => key,
-            None => return LimitForRequest::default(), // skip this check because we can't define what value we should check
+            None => return None, // skip this check because we can't define what value we should check
         };
+        dbg!(&limit_redis_key);
         
         redis::cmd("SET")
-            .arg(&key)
-            .arg(bucket.tokens_count)
+            .arg(&limit_redis_key.key)
+            .arg(limit_redis_key.bucket.tokens_count)
             .arg("EX")
-            .arg(bucket.add_tokens_every)
+            .arg(limit_redis_key.bucket.add_tokens_every)
             .arg("NX")
             .query_async::<()>(&mut redis_connection)
             .await
@@ -210,15 +233,21 @@ pub trait RateLimiterChecker {
 
         // Decrement key
         let count: i32 = redis::cmd("DECR")
-            .arg(&key)
+            .arg(&limit_redis_key.key)
             .query_async(&mut redis_connection)
             .await
             .unwrap_or(-1); // Set to 0 if the key doesn't exist
-
-        LimitForRequest::new(Some(bucket.tokens_count), Some(count),count < 0)
+        dbg!(&count);
+        Some(LimitForRequest::new(limit_redis_key.bucket.tokens_count, count,count < 0))
     }
     
-    fn get_redis_key(&self, request: &SafeRequest, addr: SocketAddr) -> Option<String>;
+    fn hash_key(&self, s: String) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        hasher.finish()
+    }
+    
+    fn get_redis_key(&self, request: &SafeRequest, addr: SocketAddr, global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>) -> Option<LimitRedisKey>;
 }
 
 
@@ -228,31 +257,64 @@ pub struct IPRateLimiterStrategy;
 pub struct UrlRateLimiterStrategy;
 
 #[derive(Clone, Debug)]
-pub struct AuthHeaderRateLimiterStrategy;
+pub struct HeaderRateLimiterStrategy;
 
 
 #[async_trait]
 impl RateLimiterChecker for IPRateLimiterStrategy {
-    fn get_redis_key(&self, _request: &SafeRequest, addr: SocketAddr) -> Option<String> {
+    fn get_redis_key(&self, _request: &SafeRequest, addr: SocketAddr, global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>) -> Option<LimitRedisKey> {
         let ip = addr.ip();
-        Some(format!("rate_limiter:ip:{}", ip))
+
+        let bucket = match buckets_per_value {
+            Some(bucket) => bucket.get(&ip.to_string()).or(global_bucket),
+            None => global_bucket
+        };
+        
+        Some(LimitRedisKey::new(format!("rate_limiter:ip:{}", self.hash_key(ip.to_string())), bucket?.to_owned()))
     }
 }
 
 
 #[async_trait]
 impl RateLimiterChecker for UrlRateLimiterStrategy {
-    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr) -> Option<String> {
-        let uri = &request.parts.uri;
-        Some(format!("rate_limiter:url:{}", uri))
+    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr, global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>) -> Option<LimitRedisKey> {
+        let uri = request.parts.uri.path();
+
+        let bucket = match buckets_per_value {
+            Some(bucket) => bucket.get(&uri.to_string()).or(global_bucket),
+            None => global_bucket
+        };
+        
+        Some(LimitRedisKey::new(format!("rate_limiter:url:{}", self.hash_key(uri.to_string())), bucket?.to_owned()))
     }
 }
 
 
-impl RateLimiterChecker for AuthHeaderRateLimiterStrategy {
-    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr) -> Option<String> {
-        let auth_header = request.parts.headers.get("authorization")?.to_str().ok()?;
-        Some(format!("rate_limiter:auth_header:{}", auth_header))
+impl RateLimiterChecker for HeaderRateLimiterStrategy {
+    fn get_redis_key(&self, request: &SafeRequest, _addr: SocketAddr, global_bucket: Option<&Bucket>, buckets_per_value: Option<&HashMap<String, Bucket>>) -> Option<LimitRedisKey> {
+        let mut found_header: Option<String> = None;
+        let mut found_bucket: Option<Bucket> = None;
+        
+        if let Some(bucket) = buckets_per_value {
+            for (k, v) in bucket {
+                match request.parts.headers.get(k.to_lowercase()) {
+                    Some(value) => {
+                        found_header = Some(value.to_str().unwrap().to_string());
+                        found_bucket = Some(v.to_owned())
+                    },
+                    None => continue,
+                };
+            };
+        };
+        
+        if found_header.is_none() && global_bucket.is_some() {
+            if let Some(value) = request.parts.headers.get("authorization") {
+                found_header = Some(value.to_str().unwrap().to_string());
+                found_bucket = global_bucket.cloned();
+            };
+        }
+        
+        Some(LimitRedisKey::new(format!("rate_limiter:header:{}", self.hash_key(found_header.unwrap())), found_bucket?.to_owned()))
     }
 }
 
@@ -273,24 +335,18 @@ impl SafeRequest {
 
 #[derive(Clone, Debug)]
 pub struct LimitForRequest {
-    total_limit: Option<u32>,
-    requests_to_exceed_limit: Option<i32>,
+    total_limit: u32,
+    requests_to_exceed_limit: i32,
     is_limit_exceeded: bool,
 }
 
 impl LimitForRequest {
-    pub fn new(total_limit: Option<u32>, requests_to_exceed_limit: Option<i32>, is_limit_exceeded: bool) -> Self {
+    pub fn new(total_limit: u32, requests_to_exceed_limit: i32, is_limit_exceeded: bool) -> Self {
         Self {
             total_limit,
             requests_to_exceed_limit,
             is_limit_exceeded,
         }
-    }
-}
-
-impl Default for LimitForRequest {
-    fn default() -> Self {
-        Self::new(None, None, false)
     }
 }
 
@@ -311,5 +367,21 @@ impl Ord for LimitForRequest {
 impl PartialOrd for LimitForRequest {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.requests_to_exceed_limit.cmp(&other.requests_to_exceed_limit))
+    }
+}
+
+
+#[derive(Debug)]
+pub struct LimitRedisKey {
+    key: String,
+    bucket: Bucket,
+}
+
+impl LimitRedisKey {
+    fn new(key: String, bucket: Bucket) -> Self {
+        Self {
+            key,
+            bucket
+        }
     }
 }

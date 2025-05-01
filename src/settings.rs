@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet};
 use std::net::IpAddr;
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
@@ -32,16 +32,22 @@ pub struct RateLimiterSettings {
 pub enum PossibleStrategies {
     IP,
     URL,
-    #[serde(rename = "auth_header")]
-    AuthHeader,
+    Header,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct LimiterSettings {
     pub strategy: PossibleStrategies,
-    pub bucket: BucketSettings,
+    pub global_bucket: Option<BucketSettings>,
+    pub buckets_per_value: Option<Vec<BuckerPerValue>>,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct BuckerPerValue {
+    pub value: String,
+    pub tokens_count: u32,
+    pub add_tokens_every: u32,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct BucketSettings {

@@ -28,7 +28,11 @@ impl ProxyServer {
         let listener = tokio::net::TcpListener::bind(self.settings.api_gateway_settings.proxy_server_addr.clone())
             .await?;
 
-        let limiter = Arc::new(RateLimiterManager::new(self.settings.rate_limiter_settings.clone()).unwrap());
+        let limiter = Arc::new(
+            RateLimiterManager::new(self.settings.rate_limiter_settings.clone()).map_err(
+                |e| std::io::Error::new(std::io::ErrorKind::Other,  e)
+            )?
+        );
         
         let app = Router::new()
             .route("/*path", any(handler))
