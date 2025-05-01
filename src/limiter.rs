@@ -64,8 +64,6 @@ pub async fn middleware(
     }
     
     let mut response = next.run(Request::from_parts(safe_request.parts, Body::from(safe_request.body))).await;
-
-    dbg!(&lowest_limit);
     
     if let Some(limit) = &lowest_limit {
         let headers = response.headers_mut();   

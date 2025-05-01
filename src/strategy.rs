@@ -69,8 +69,7 @@ pub trait RateLimiterChecker {
             Some(key) => key,
             None => return None, // skip this check because we can't define what value we should check
         };
-        dbg!(&limit_redis_key);
-
+        
         redis::cmd("SET")
             .arg(&limit_redis_key.key)
             .arg(limit_redis_key.bucket.tokens_count)
@@ -87,7 +86,7 @@ pub trait RateLimiterChecker {
             .query_async(&mut redis_connection)
             .await
             .unwrap_or(-1); // Set to 0 if the key doesn't exist
-        dbg!(&count);
+
         Some(LimitForRequest::new(limit_redis_key.bucket.tokens_count, count,count < 0))
     }
 
